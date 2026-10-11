@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+import asyncio
+import aiohttp
+import time
+import argparse
+import sys
+import random
+
+# ANSI Цвета для терминала
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+def print_banner():
+    banner = f"""{CYAN}{BOLD}
+ ██╗   ██╗ ██████╗ ██╗██████╗ 
+ ██║   ██║██╔═══██╗██║██╔══██╗
+ ██║   ██║██║   ██║██║██║  ██║
+ ╚██╗ ██╔╝██║   ██║██║██║  ██║
+  ╚████╔╝ ╚██████╔╝██║██████╔╝
+   ╚═══╝   ╚═════╝ ╚═╝╚═════╝ 
+    {RESET}{YELLOW}[!] VoidStrike v1.4 | Jitter & Anti-Detection Edition{RESET}
+    """
+    print(banner)
+
+def load_user_agents():
+    return [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+    ]
+
+def parse_ports(port_string):
+    ports = set()
+    parts = port_string.split(',')
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                ports.update(range(start, end + 1))
+            except ValueError:
+                print(f"{RED}[!] Ошибка в диапазоне портов: {part}{RESET}")
+        else:
+            try:
+                ports.add(int(part))
+            except ValueError:
+                print(f"{RED}[!] Неверный формат порта: {part}{RESET}")
+    return sorted(list(ports))
+
+def load_proxies(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            proxies = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        return proxies
+    except Exception as e:
+        print(f"{RED}[!] Ошибка чтения файла прокси: {e}{RESET}")
+        sys.exit(1)
+
+async def send_request(session, semaphore, url, user_agent_pool, proxy_pool=None):
+    async with semaphore:
+        # НОВОЕ: Случайная микро-пауза (Jitter) от 0.01 до 0.15 сек перед отправкой
+        await asyncio.sleep(random.uniform(0.01, 0.15))
+        
+        current_proxy = random.choice(proxy_pool) if proxy_pool else None
+        current_ua = random.choice(user_agent_pool)
+        headers = {"User-Agent": current_ua}
+        
+        try:
+            start_time = time.time()
+            async with session.get(url, proxy=current_proxy, headers=headers, timeout=5) as response:
+                duration = time.time() - start_time
+                content_length = response.content_length if response.content_length is not None else -1
+                return response.status, duration, content_length
+        except Exception as e:
+            return None, str(e), -1
+
+async def test_target(session, url, concurrent, total, user_agent_pool, proxy_pool):
+    semaphore = asyncio.Semaphore(concurrent)
+    print(f"\n{CYAN}[*] Цель:{RESET} {url}")
+    if proxy_pool:
+        print(f"{CYAN}[*] Пул прокси:{RESET} активен ({len(proxy_pool)} шт.)")
+    print(f"{CYAN}[*] Параллельность:{RESET} {concurrent} | {CYAN}Запросов:{RESET} {total} (с Jitter)")
+    
+    start_time = time.time()
+    tasks = [send_request(session, semaphore, url, user_agent_pool, proxy_pool) for _ in range(total)]
+    results = await asyncio.gather(*tasks)
+    total_time = time.time() - start_time
+    
+    success = 0
+    rate_limited = 0
+    errors = 0
+    content_lengths = []
+
+    for status, _, c_length in results:
+        if status == 200:
+            success += 1
+            if c_length != -1: content_lengths.append(c_length)
+        elif status in (429, 403):
+            rate_limited += 1
+        else:
+            errors += 1
+
+    distinct_lengths = len(set(content_lengths))
+    avg_length = sum(content_lengths) / len(content_lengths) if content_lengths else 0
+    
+    print(f"{GREEN}[✓] Успешно (200): {success}{RESET} | {YELLOW}[!] Rate Limit (429/403): {rate_limited}{RESET} | {RED}[✗] Ошибок: {errors}{RESET}")
+    print(f"{CYAN}[i] Анализ контента:{RESET} Уникальных размеров ответа: {distinct_lengths} | Ср. размер: {int(avg_length)} байт")
+    if distinct_lengths > 1:
+        print(f"{RED}[!] Аномалия:{RESET} Обнаружено изменение размера ответов при нагрузке!")
+
+    print(f"[-] Время: {total_time:.2f} сек")
+    if total_time > 0:
+        print(f"{YELLOW}[⚡] Скорость с учетом Jitter: {total / total_time:.2f} запр/сек{RESET}")
+
+async def main():
+    print_banner()
+    
+    parser = argparse.ArgumentParser(description="VoidStrike - Asynchronous Testing Tool v1.4")
+    parser.add_argument("-u", "--url", required=True, help="Базовый URL или IP цели (например, http://127.0.0.1)")
+    parser.add_argument("-p", "--ports", default="80", help="Порты в стиле Nmap (например: 80, 80-85, 443)")
+    parser.add_argument("-c", "--concurrency", type=int, default=50, help="Количество одновременных запросов")
+    parser.add_argument("-n", "--requests", type=int, default=200, help="Количество запросов на каждый порт")
+    parser.add_argument("--proxy-file", default=None, help="Путь к файлу со списком прокси")
+    parser.add_argument("--tor", action="store_true", help="Автоматически использовать локальный Tor (socks5://127.0.0.1:9050)")
+
+    args = parser.parse_args()
+
+    user_agent_pool = load_user_agents()
+    print(f"{GREEN}[+] Загружено User-Agent в ротацию: {len(user_agent_pool)}{RESET}")
+
+    proxy_pool = None
+    if args.proxy_file:
+        proxy_pool = load_proxies(args.proxy_file)
+        print(f"{GREEN}[+] Загружено прокси в ротацию: {len(proxy_pool)}{RESET}")
+    elif args.tor:
+        proxy_pool = ["socks5://127.0.0.1:9050"]
+        print(f"{GREEN}[+] Используется локальный Tor-прокси{RESET}")
+
+    target_ports = parse_ports(args.ports)
+    if not target_ports:
+        print(f"{RED}[!] Не удалось распознать порты.{RESET}")
+        sys.exit(1)
+
+    base_url = args.url.rstrip('/')
+    target_urls = [f"{base_url}:{port}/" for port in target_ports]
+
+    connector = aiohttp.TCPConnector(limit=args.concurrency * len(target_urls))
+    async with aiohttp.ClientSession(connector=connector) as session:
+        for url in target_urls:
+            await test_target(session, url, args.concurrency, args.requests, user_agent_pool, proxy_pool)
+
+if __name__ == "__main__":
+    asyncio.run(main())
