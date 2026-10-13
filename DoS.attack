@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-import asyncio
-import aiohttp
-import time
-import argparse
-import sys
-import random
+"""VoidStrike v2.0 - Asynchronous Layer 7 Resilience Profiler & Stress Testing Utility.
 
-# ANSI Цвета для терминала
+Professional-grade asynchronous HTTP load testing and auditing tool
+with streaming processing, percentile latency tracking, and traffic shaping.
+"""
+
+import argparse
+import asyncio
+import json
+import random
+import sys
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import aiohttp
+
+# ANSI Color Palette for Terminal Output
 CYAN = "\033[96m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -14,147 +23,350 @@ RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
-def print_banner():
-    banner = f"""{CYAN}{BOLD}
+
+def print_banner() -> None:
+  banner = f"""{CYAN}{BOLD}
  ██╗   ██╗ ██████╗ ██╗██████╗ 
  ██║   ██║██╔═══██╗██║██╔══██╗
  ██║   ██║██║   ██║██║██║  ██║
  ╚██╗ ██╔╝██║   ██║██║██║  ██║
   ╚████╔╝ ╚██████╔╝██║██████╔╝
    ╚═══╝   ╚═════╝ ╚═╝╚═════╝ 
-    {RESET}{YELLOW}[!] VoidStrike v1.4 | Jitter & Anti-Detection Edition{RESET}
+    {RESET}{YELLOW}[*] VoidStrike v2.0 | Engineering Edition{RESET}
     """
-    print(banner)
+  print(banner)
 
-def load_user_agents():
-    return [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
-    ]
 
-def parse_ports(port_string):
-    ports = set()
-    parts = port_string.split(',')
-    for part in parts:
-        part = part.strip()
-        if '-' in part:
-            try:
-                start, end = map(int, part.split('-'))
-                ports.update(range(start, end + 1))
-            except ValueError:
-                print(f"{RED}[!] Ошибка в диапазоне портов: {part}{RESET}")
-        else:
-            try:
-                ports.add(int(part))
-            except ValueError:
-                print(f"{RED}[!] Неверный формат порта: {part}{RESET}")
-    return sorted(list(ports))
+def load_user_agents() -> List[str]:
+  """Returns a curated list of modern browser User-Agents."""
+  return [
+      (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+          " like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      ),
+      (
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      ),
+      (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101"
+          " Firefox/123.0"
+      ),
+      (
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+          " (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15"
+      ),
+      (
+          "Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101"
+          " Firefox/123.0"
+      ),
+  ]
 
-def load_proxies(file_path):
+
+def parse_ports(port_string: str) -> List[int]:
+  """Parses Nmap-style port definitions (e.g. 80,443,8000-8010)."""
+  ports = set()
+  for part in port_string.split(","):
+    part = part.strip()
+    if "-" in part:
+      try:
+        start, end = map(int, part.split("-"))
+        ports.update(range(start, end + 1))
+      except ValueError:
+        print(f"{RED}[!] Invalid port range format: {part}{RESET}")
+    else:
+      try:
+        ports.add(int(part))
+      except ValueError:
+        print(f"{RED}[!] Invalid port format: {part}{RESET}")
+  return sorted(list(ports))
+
+
+def load_proxies(file_path: str) -> List[str]:
+  """Loads proxy list from a file, ignoring comments and empty lines."""
+  try:
+    with open(file_path, "r", encoding="utf-8") as f:
+      return [
+          line.strip()
+          for line in f
+          if line.strip() and not line.startswith("#")
+      ]
+  except Exception as e:
+    print(f"{RED}[!] Failed to read proxy file: {e}{RESET}")
+    sys.exit(1)
+
+
+async def execute_request(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+    url: str,
+    user_agent_pool: List[str],
+    proxy_pool: Optional[List[str]],
+    timeout_sec: float,
+    use_jitter: bool,
+) -> Tuple[Optional[int], float, int, str]:
+  """Executes a single HTTP request with granular error classification."""
+  async with semaphore:
+    if use_jitter:
+      await asyncio.sleep(random.uniform(0.01, 0.12))
+
+    current_proxy = random.choice(proxy_pool) if proxy_pool else None
+    current_ua = random.choice(user_agent_pool)
+    headers = {"User-Agent": current_ua}
+
+    start_time = time.perf_counter()
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            proxies = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-        return proxies
+      async with session.get(
+          url, proxy=current_proxy, headers=headers, timeout=timeout_sec
+      ) as response:
+        duration = time.perf_counter() - start_time
+        content_length = (
+            response.content_length
+            if response.content_length is not None
+            else -1
+        )
+        return response.status, duration, content_length, "OK"
+    except asyncio.TimeoutError:
+      return None, time.perf_counter() - start_time, -1, "TIMEOUT"
+    except aiohttp.ClientConnectorError:
+      return None, time.perf_counter() - start_time, -1, "CONNECTION_ERROR"
+    except aiohttp.ClientOSError:
+      return None, time.perf_counter() - start_time, -1, "OS_SOCKET_ERROR"
     except Exception as e:
-        print(f"{RED}[!] Ошибка чтения файла прокси: {e}{RESET}")
-        sys.exit(1)
+      return (
+          None,
+          time.perf_counter() - start_time,
+          -1,
+          f"ERROR_{type(e).__name__}",
+      )
 
-async def send_request(session, semaphore, url, user_agent_pool, proxy_pool=None):
-    async with semaphore:
-        # НОВОЕ: Случайная микро-пауза (Jitter) от 0.01 до 0.15 сек перед отправкой
-        await asyncio.sleep(random.uniform(0.01, 0.15))
-        
-        current_proxy = random.choice(proxy_pool) if proxy_pool else None
-        current_ua = random.choice(user_agent_pool)
-        headers = {"User-Agent": current_ua}
-        
-        try:
-            start_time = time.time()
-            async with session.get(url, proxy=current_proxy, headers=headers, timeout=5) as response:
-                duration = time.time() - start_time
-                content_length = response.content_length if response.content_length is not None else -1
-                return response.status, duration, content_length
-        except Exception as e:
-            return None, str(e), -1
 
-async def test_target(session, url, concurrent, total, user_agent_pool, proxy_pool):
-    semaphore = asyncio.Semaphore(concurrent)
-    print(f"\n{CYAN}[*] Цель:{RESET} {url}")
-    if proxy_pool:
-        print(f"{CYAN}[*] Пул прокси:{RESET} активен ({len(proxy_pool)} шт.)")
-    print(f"{CYAN}[*] Параллельность:{RESET} {concurrent} | {CYAN}Запросов:{RESET} {total} (с Jitter)")
-    
-    start_time = time.time()
-    tasks = [send_request(session, semaphore, url, user_agent_pool, proxy_pool) for _ in range(total)]
-    results = await asyncio.gather(*tasks)
-    total_time = time.time() - start_time
-    
-    success = 0
-    rate_limited = 0
-    errors = 0
-    content_lengths = []
+async def profile_target(
+    session: aiohttp.ClientSession,
+    url: str,
+    concurrency: int,
+    total_requests: int,
+    user_agent_pool: List[str],
+    proxy_pool: Optional[List[str]],
+    timeout_sec: float,
+    use_jitter: bool,
+) -> Dict[str, Any]:
+  """Runs a streamed load test against a target URL and calculates percentiles."""
+  semaphore = asyncio.Semaphore(concurrency)
+  print(f"\n{CYAN}[*] Profiling Target:{RESET} {url}")
+  if proxy_pool:
+    print(
+        f"{CYAN}[*] Proxy Rotation:{RESET} Active ({len(proxy_pool)} endpoints)"
+    )
+  print(
+      f"{CYAN}[*] Concurrency:{RESET} {concurrency} | {CYAN}Total Requests:{RESET}"
+      f" {total_requests}"
+  )
+  print(
+      f"{CYAN}[*] Mode:{RESET}"
+      f" {'Stealth (with Jitter)' if use_jitter else 'Pure Benchmark (No Jitter)'}"
+  )
 
-    for status, _, c_length in results:
-        if status == 200:
-            success += 1
-            if c_length != -1: content_lengths.append(c_length)
-        elif status in (429, 403):
-            rate_limited += 1
-        else:
-            errors += 1
+  tasks = [
+      execute_request(
+          session,
+          semaphore,
+          url,
+          user_agent_pool,
+          proxy_pool,
+          timeout_sec,
+          use_jitter,
+      )
+      for _ in range(total_requests)
+  ]
 
-    distinct_lengths = len(set(content_lengths))
-    avg_length = sum(content_lengths) / len(content_lengths) if content_lengths else 0
-    
-    print(f"{GREEN}[✓] Успешно (200): {success}{RESET} | {YELLOW}[!] Rate Limit (429/403): {rate_limited}{RESET} | {RED}[✗] Ошибок: {errors}{RESET}")
-    print(f"{CYAN}[i] Анализ контента:{RESET} Уникальных размеров ответа: {distinct_lengths} | Ср. размер: {int(avg_length)} байт")
-    if distinct_lengths > 1:
-        print(f"{RED}[!] Аномалия:{RESET} Обнаружено изменение размера ответов при нагрузке!")
+  start_time = time.perf_counter()
 
-    print(f"[-] Время: {total_time:.2f} сек")
-    if total_time > 0:
-        print(f"{YELLOW}[⚡] Скорость с учетом Jitter: {total / total_time:.2f} запр/сек{RESET}")
+  status_counts: Dict[int, int] = {}
+  error_counts: Dict[str, int] = {}
+  latencies: List[float] = []
+  content_lengths: set = set()
 
-async def main():
-    print_banner()
-    
-    parser = argparse.ArgumentParser(description="VoidStrike - Asynchronous Testing Tool v1.4")
-    parser.add_argument("-u", "--url", required=True, help="Базовый URL или IP цели (например, http://127.0.0.1)")
-    parser.add_argument("-p", "--ports", default="80", help="Порты в стиле Nmap (например: 80, 80-85, 443)")
-    parser.add_argument("-c", "--concurrency", type=int, default=50, help="Количество одновременных запросов")
-    parser.add_argument("-n", "--requests", type=int, default=200, help="Количество запросов на каждый порт")
-    parser.add_argument("--proxy-file", default=None, help="Путь к файлу со списком прокси")
-    parser.add_argument("--tor", action="store_true", help="Автоматически использовать локальный Tor (socks5://127.0.0.1:9050)")
+  for coro in asyncio.as_completed(tasks):
+    status, duration, c_length, err_type = await coro
 
-    args = parser.parse_args()
+    if status is not None:
+      status_counts[status] = status_counts.get(status, 0) + 1
+      latencies.append(duration)
+      if c_length != -1:
+        content_lengths.add(c_length)
+    else:
+      error_counts[err_type] = error_counts.get(err_type, 0) + 1
 
-    user_agent_pool = load_user_agents()
-    print(f"{GREEN}[+] Загружено User-Agent в ротацию: {len(user_agent_pool)}{RESET}")
+  total_time = time.perf_counter() - start_time
 
-    proxy_pool = None
-    if args.proxy_file:
-        proxy_pool = load_proxies(args.proxy_file)
-        print(f"{GREEN}[+] Загружено прокси в ротацию: {len(proxy_pool)}{RESET}")
-    elif args.tor:
-        proxy_pool = ["socks5://127.0.0.1:9050"]
-        print(f"{GREEN}[+] Используется локальный Tor-прокси{RESET}")
+  latencies.sort()
+  n = len(latencies)
 
-    target_ports = parse_ports(args.ports)
-    if not target_ports:
-        print(f"{RED}[!] Не удалось распознать порты.{RESET}")
-        sys.exit(1)
+  def get_percentile(p: float) -> float:
+    if not latencies:
+      return 0.0
+    idx = int(n * (p / 100.0))
+    return latencies[min(idx, n - 1)] * 1000.0
 
-    base_url = args.url.rstrip('/')
-    target_urls = [f"{base_url}:{port}/" for port in target_ports]
+  metrics = {
+      "url": url,
+      "total_requests": total_requests,
+      "duration_seconds": round(total_time, 4),
+      "rps": round(total_requests / total_time, 2) if total_time > 0 else 0,
+      "successful_responses": sum(status_counts.values()),
+      "status_distribution": status_counts,
+      "error_distribution": error_counts,
+      "latency_ms": {
+          "p50": round(get_percentile(50), 2),
+          "p95": round(get_percentile(95), 2),
+          "p99": round(get_percentile(99), 2),
+          "max": round(latencies[-1] * 1000.0, 2) if latencies else 0.0,
+      },
+      "unique_content_lengths_count": len(content_lengths),
+  }
 
-    connector = aiohttp.TCPConnector(limit=args.concurrency * len(target_urls))
+  print(f"\n{GREEN}[✓] Profiling Completed in {total_time:.2f}s{RESET}")
+  print(
+      f"    {CYAN}Throughput (RPS):{RESET}"
+      f" {YELLOW}{metrics['rps']}{RESET} req/sec"
+  )
+  print(f"    {CYAN}Status Distribution:{RESET} {status_counts}")
+  if error_counts:
+    print(f"    {RED}[!] Errors / Drops:{RESET} {error_counts}")
+
+  print(f"    {CYAN}Latency Percentiles (ms):{RESET}")
+  print(
+      f"      - p50: {metrics['latency_ms']['p50']} ms | p95:"
+      f" {metrics['latency_ms']['p95']} ms | p99:"
+      f" {metrics['latency_ms']['p99']} ms | Max:"
+      f" {metrics['latency_ms']['max']} ms"
+  )
+  print(
+      f"    {CYAN}Unique Content Lengths:{RESET}"
+      f" {metrics['unique_content_lengths_count']}"
+  )
+
+  return metrics
+
+
+async def main() -> None:
+  print_banner()
+
+  parser = argparse.ArgumentParser(
+      description="VoidStrike Layer 7 Resilience Profiler v2.0"
+  )
+  parser.add_argument(
+      "-u",
+      "--url",
+      required=True,
+      help="Target base URL or IP (e.g. http://127.0.0.1)",
+  )
+  parser.add_argument(
+      "-p",
+      "--ports",
+      default="80",
+      help="Nmap-style ports specification (e.g. 80,443,8000-8005)",
+  )
+  parser.add_argument(
+      "-c",
+      "--concurrency",
+      type=int,
+      default=50,
+      help="Concurrent asynchronous connections",
+  )
+  parser.add_argument(
+      "-n",
+      "--requests",
+      type=int,
+      default=200,
+      help="Total requests per port",
+  )
+  parser.add_argument(
+      "--timeout",
+      type=float,
+      default=5.0,
+      help="Request timeout in seconds",
+  )
+  parser.add_argument(
+      "--jitter",
+      action="store_true",
+      help="Enable stealth jitter (adds random micro-delays)",
+  )
+  parser.add_argument(
+      "--proxy-file", default=None, help="Path to newline-separated proxy list"
+  )
+  parser.add_argument(
+      "--tor",
+      action="store_true",
+      help="Route traffic through local Tor (socks5://127.0.0.1:9050)",
+  )
+  parser.add_argument(
+      "-o",
+      "--output",
+      default=None,
+      help="Export results to JSON report file",
+  )
+
+  args = parser.parse_args()
+
+  user_agent_pool = load_user_agents()
+  proxy_pool = None
+
+  if args.proxy_file:
+    proxy_pool = load_proxies(args.proxy_file)
+    print(f"{GREEN}[+] Loaded proxies: {len(proxy_pool)}{RESET}")
+  elif args.tor:
+    proxy_pool = ["socks5://127.0.0.1:9050"]
+    print(f"{GREEN}[+] Routing through local Tor proxy{RESET}")
+
+  target_ports = parse_ports(args.ports)
+  if not target_ports:
+    print(f"{RED}[!] No valid ports parsed.{RESET}")
+    sys.exit(1)
+
+  base_url = args.url.rstrip("/")
+  target_urls = [f"{base_url}:{port}/" for port in target_ports]
+
+  connector = aiohttp.TCPConnector(
+      limit=args.concurrency * len(target_urls),
+      ttl_dns_cache=300,
+      enable_cleanup_closed=True,
+  )
+
+  all_reports = []
+
+  try:
     async with aiohttp.ClientSession(connector=connector) as session:
-        for url in target_urls:
-            await test_target(session, url, args.concurrency, args.requests, user_agent_pool, proxy_pool)
+      for url in target_urls:
+        report = await profile_target(
+            session=session,
+            url=url,
+            concurrency=args.concurrency,
+            total_requests=args.requests,
+            user_agent_pool=user_agent_pool,
+            proxy_pool=proxy_pool,
+            timeout_sec=args.timeout,
+            use_jitter=args.jitter,
+        )
+        all_reports.append(report)
+
+      if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+          json.dump(all_reports, f, indent=4, ensure_ascii=False)
+        print(
+            f"\n{GREEN}[+] Comprehensive JSON report successfully saved to"
+            f" {args.output}{RESET}"
+        )
+
+  except KeyboardInterrupt:
+    print(f"\n{YELLOW}[!] Profiling interrupted gracefully by user.{RESET}")
+    sys.exit(0)
+
 
 if __name__ == "__main__":
+  try:
     asyncio.run(main())
+  except KeyboardInterrupt:
+    print(f"\n{YELLOW}[!] Operation aborted.{RESET}")
+    sys.exit(0)
